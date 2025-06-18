@@ -1,0 +1,285 @@
+import customtkinter as ctk
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+import re
+import urllib.parse
+import threading
+import os
+import time
+from tkinter import filedialog, messagebox
+
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+LANG = {
+    "zh": {
+        "title": "館藏查詢",
+        "subtitle": "批量查詢Excel書目於香港公共圖書館是否有館藏",
+        "drag": "拖曳Excel檔案至此，或點擊下方按鈕選擇",
+        "no_file": "尚未選擇檔案",
+        "choose_files": "選擇檔案",
+        "start": "開始",
+        "stop": "停止",
+        "searching": "正在查詢，請稍候...\n",
+        "stopping": "\n正在結束...\n",
+        "done": "\n已完成！\n",
+        "totalcount": "已完成",
+        "saved": "已產生新檔案：",
+        "warning_title": "未選擇檔案",
+        "warning_msg": "請先選擇Excel檔案",
+        "err_filetype": "檔案格式錯誤",
+        "err_filetype_msg": "請選擇 Excel 檔案（.xlsx）！",
+        "ask_stop_title": "確認停止",
+        "ask_stop_msg": "確定要停止查詢嗎？",
+        "msg_done": "查詢完畢！新檔案已儲存：\n",
+        "err": "發生錯誤：",
+        "zh_btn": "中文",
+        "en_btn": "English"
+    },
+    "en": {
+        "title": "Collection Search",
+        "subtitle": "Batch check if Excel book titles are available in HKPL",
+        "drag": "Drag your Excel file here or click the button below to select",
+        "no_file": "No file selected",
+        "choose_files": "Choose Files",
+        "start": "Start",
+        "stop": "Stop",
+        "searching": "Searching, please wait...\n",
+        "stopping": "\nStopping...\n",
+        "done": "\nDone!\n",
+        "totalcount": "Done",
+        "saved": "Saved as: ",
+        "warning_title": "No File Selected",
+        "warning_msg": "Please select an Excel file first.",
+        "err_filetype": "File Type Error",
+        "err_filetype_msg": "Please select an Excel file (*.xlsx)!",
+        "ask_stop_title": "Confirm Stop",
+        "ask_stop_msg": "Are you sure you want to stop?",
+        "msg_done": "Done! New file saved at:\n",
+        "err": "Error: ",
+        "zh_btn": "中文",
+        "en_btn": "English"
+    }
+}
+
+def check_book_availability(book_title):
+    term = urllib.parse.quote(str(book_title))
+    url = f"https://webcat.hkpl.gov.hk/search/query?term_1={term}&theme=WEB"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        if soup.find("div", id="noResults"):
+            return "N"
+        result_count_span = soup.find("span", string=lambda t: t and "結果總數" in t)
+        if result_count_span:
+            match = re.search(r"結果總數：(\d+)", result_count_span.text)
+            if match and int(match.group(1)) >= 1:
+                return "Y"
+        return "N"
+    except Exception:
+        return "N"
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.lang = "zh"
+        self.root.title(LANG[self.lang]["title"])
+        self.root.geometry("600x650")
+        self.root.resizable(False, False)
+        self.file_path = None
+        self._running = False
+
+        # Top right language switch
+        self.frame_lang = ctk.CTkFrame(self.root, fg_color="transparent", height=32)
+        self.frame_lang.pack(fill="x", pady=(6, 0))
+        self.frame_lang.pack_propagate(False)
+        self.lang_btn_zh = ctk.CTkButton(self.frame_lang, text=LANG["zh"]["zh_btn"], width=56, height=32, command=lambda: self.switch_lang("zh"))
+        self.lang_btn_zh.pack(side="right", padx=(0, 10))
+        self.lang_btn_en = ctk.CTkButton(self.frame_lang, text=LANG["en"]["en_btn"], width=56, height=32, command=lambda: self.switch_lang("en"))
+        self.lang_btn_en.pack(side="right", padx=(0, 2))
+
+        # Title
+        self.label_title = ctk.CTkLabel(self.root, text=LANG[self.lang]["title"], font=ctk.CTkFont(size=32, weight="bold"))
+        self.label_title.pack(pady=(10, 10))
+
+        self.label_sub = ctk.CTkLabel(self.root, text=LANG[self.lang]["subtitle"], font=ctk.CTkFont(size=16))
+        self.label_sub.pack(pady=(0, 25))
+
+        # File frame
+        self.file_frame = ctk.CTkFrame(self.root, height=120, fg_color="#F5F6FC")
+        self.file_frame.pack(padx=30, pady=0, fill="x")
+        self.file_frame.pack_propagate(True)
+
+        self.label_drag = ctk.CTkLabel(self.file_frame, text=LANG[self.lang]["drag"], text_color="#666", font=ctk.CTkFont(size=15))
+        self.label_drag.pack(pady=(25, 0))
+
+        self.label_selected = ctk.CTkLabel(self.file_frame, text=LANG[self.lang]["no_file"], text_color="#aaa", font=ctk.CTkFont(size=16, weight="bold"))
+        self.label_selected.pack(pady=(8, 10))
+
+        self.button_choose = ctk.CTkButton(
+            self.file_frame,
+            text=LANG[self.lang]["choose_files"],
+            command=self.select_file,
+            width=180,
+            height=36,
+            font=ctk.CTkFont(size=15),
+            anchor="center"
+        )
+        self.button_choose.pack()
+        self.bottom_spacer = ctk.CTkLabel(self.file_frame, text="", height=1)
+        self.bottom_spacer.pack(pady=0)
+
+        # Enable drag and drop
+        self.file_frame.drop_target_register(DND_FILES)
+        self.file_frame.dnd_bind('<<Drop>>', self.on_file_drop)
+
+        # Start/Stop button
+        self.button_start = ctk.CTkButton(self.root, text=LANG[self.lang]["start"], command=self.start_search, fg_color="#2A62D5",
+                                          hover_color="#1B458E", font=ctk.CTkFont(size=18, weight="bold"))
+        self.button_start.pack(pady=(30, 10), ipadx=8, ipady=4)
+
+        # Progress Bar
+        self.progress = ctk.CTkProgressBar(self.root, orientation="horizontal", width=520, height=15)
+        self.progress.pack(pady=(8, 0))
+        self.progress.set(0)
+        self.progress_label = ctk.CTkLabel(self.root, text=f"{LANG[self.lang]['totalcount'].strip()} 0/0", font=ctk.CTkFont(size=14, weight="bold"))
+        self.progress_label.pack(pady=(2, 0))
+
+        # Results area
+        self.results_box = ctk.CTkTextbox(self.root, width=520, height=180, font=("Microsoft JhengHei", 14), wrap="word", border_width=0)
+        self.results_box.pack(pady=(18, 0))
+        self.results_box.configure(state="disabled")
+
+        self.update_lang_buttons()
+
+    def update_lang_buttons(self):
+        if self.lang == "zh":
+            self.lang_btn_zh.configure(state="disabled", fg_color="#eee", text_color="#999")
+            self.lang_btn_en.configure(state="normal", fg_color="#2A62D5", text_color="#fff")
+        else:
+            self.lang_btn_en.configure(state="disabled", fg_color="#eee", text_color="#999")
+            self.lang_btn_zh.configure(state="normal", fg_color="#2A62D5", text_color="#fff")
+
+    def switch_lang(self, lang):
+        if self.lang == lang:
+            return
+        self.lang = lang
+        self.root.title(LANG[lang]["title"])
+        self.label_title.configure(text=LANG[lang]["title"])
+        self.label_sub.configure(text=LANG[lang]["subtitle"])
+        self.label_drag.configure(text=LANG[lang]["drag"])
+        self.button_choose.configure(text=LANG[lang]["choose_files"])
+        if not self.file_path:
+            self.label_selected.configure(text=LANG[lang]["no_file"])
+        self.button_start.configure(text=LANG[lang]["start"] if not self._running else LANG[lang]["stop"])
+        self.progress_label.configure(text=f"{LANG[self.lang]['totalcount']} {getattr(self, 'progress_done', 0)}/{getattr(self, 'progress_total', 0)}")
+        self.update_lang_buttons()
+
+    def on_file_drop(self, event):
+        file = event.data.strip('{}')
+        if file.lower().endswith('.xlsx'):
+            self.file_path = file
+            self.label_selected.configure(text=os.path.basename(file), text_color="#178537", font=ctk.CTkFont(size=20, weight="bold"))
+            self.label_drag.configure(text="")
+        else:
+            self.file_path = None
+            self.label_selected.configure(text=LANG[self.lang]["no_file"], text_color="#aaa", font=ctk.CTkFont(size=16, weight="bold"))
+            messagebox.showerror(LANG[self.lang]["err_filetype"], LANG[self.lang]["err_filetype_msg"])
+
+    def select_file(self):
+        filetypes = [("Excel Files", "*.xlsx")]
+        path = filedialog.askopenfilename(title=LANG[self.lang]["choose_files"], filetypes=filetypes)
+        if path:
+            self.file_path = path
+            self.label_selected.configure(text=os.path.basename(path), text_color="#178537", font=ctk.CTkFont(size=20, weight="bold"))
+            self.label_drag.configure(text="")
+        else:
+            self.file_path = None
+            self.label_selected.configure(text=LANG[self.lang]["no_file"], text_color="#aaa", font=ctk.CTkFont(size=16, weight="bold"))
+
+    def start_search(self):
+        if not self._running:
+            if not self.file_path:
+                messagebox.showwarning(LANG[self.lang]["warning_title"], LANG[self.lang]["warning_msg"])
+                return
+            self._running = True
+            self.button_start.configure(text=LANG[self.lang]["stop"], fg_color="#db3d3d", hover_color="#a82a2a")
+            self.results_box.configure(state="normal")
+            self.results_box.delete(1.0, "end")
+            self.results_box.insert("end", LANG[self.lang]["searching"])
+            self.results_box.configure(state="disabled")
+            self.progress.set(0)
+            threading.Thread(target=self.run_search, daemon=True).start()
+        else:
+            if messagebox.askyesno(LANG[self.lang]["ask_stop_title"], LANG[self.lang]["ask_stop_msg"]):
+                self._running = False
+                self.results_box.configure(state="normal")
+                self.results_box.insert("end", LANG[self.lang]["stopping"])
+                self.results_box.configure(state="disabled")
+
+    def run_search(self):
+        try:
+            df = pd.read_excel(self.file_path, header=2)
+            total = len(df)
+            result_lines = []
+            idx = 0
+            for idx, (i, row) in enumerate(df.iterrows()):
+                if not self._running or idx >= total:
+                    break
+                book_name = row['書名']
+                result = check_book_availability(book_name)
+                if not self._running:
+                    break
+                df.at[i, '公共圖書館館藏'] = result
+                msg = f"{book_name}: {result}"
+                result_lines.append(msg)
+                self.show_progress(result_lines, (idx + 1) / total, done=(idx + 1), total=total)
+                # delay
+                # for _ in range(10):
+                #     if not self._running:
+                #         break
+                #     time.sleep(0.1)
+            if not self._running:
+                result_lines.append("已結束。" if self.lang == "zh" else "Stopped.")
+                self.show_progress(result_lines, idx / total, done=idx, total=total)
+            else:
+                save_path = os.path.splitext(self.file_path)[0] + "_updated.xlsx"
+                df.to_excel(save_path, index=False)
+                result_lines.append("\nJob Done!\n" if self.lang == "en" else "\n已完成！\n")
+                result_lines.append(f"已產生新檔案：{os.path.basename(save_path)}" if self.lang == "zh"
+                                    else f"New file saved: {os.path.basename(save_path)}")
+                self.show_progress(result_lines, 1.0, done=total, total=total)
+                messagebox.showinfo("完成" if self.lang == "zh" else "Done",
+                                    f"查詢完畢！新檔案已儲存：\n{save_path}" if self.lang == "zh"
+                                    else f"Search done! File saved:\n{save_path}")
+        except Exception as e:
+            self.results_box.configure(state="normal")
+            self.results_box.insert("end", f"\n發生錯誤：{e}")
+            self.results_box.configure(state="disabled")
+        finally:
+            self._running = False
+            self.button_start.configure(text="Start", fg_color="#2A62D5", hover_color="#1B458E")
+            self.button_start.configure(state="normal")
+            self.progress.set(0)
+
+
+    def show_progress(self, lines, progress_ratio, done=0, total=0):
+        self.progress.set(progress_ratio)
+        self.progress_done = done   
+        self.progress_total = total
+        lang = self.lang if hasattr(self, "lang") else "zh"
+        self.progress_label.configure(text=f"{LANG[lang]['totalcount']} {done}/{total}")
+        self.results_box.configure(state="normal")
+        content = LANG[lang]["searching"] + "\n".join(lines)
+        self.results_box.delete(1.0, "end")
+        self.results_box.insert("end", content)
+        self.results_box.see("end")
+        self.results_box.configure(state="disabled")
+
+if __name__ == "__main__":
+    root = TkinterDnD.Tk()
+    app = App(root)
+    root.mainloop()
